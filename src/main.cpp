@@ -9,12 +9,13 @@
 
 // CAN_250KBPS = J1939 default. Change if your bus runs at a different speed.
 // MCP_8MHZ / MCP_16MHZ – match the crystal on your MCP2515 board.
-CANManager canMgr(CAN_CS_PIN, CAN_250KBPS, MCP_8MHZ);
+CANManager canMgr(CAN_CS_PIN, CAN_500KBPS, MCP_8MHZ);
 
 void setup()
 {
     Serial.begin(115200);
     SPI.begin();
+    delay(100); // allow SPI bus to settle
 
     registerCANMessages(canMgr);
 
@@ -33,4 +34,9 @@ void setup()
 void loop()
 {
     canMgr.update();
+
+    float speedPercent;
+    if (consumePercentSpeed(speedPercent)) {
+        Serial.printf("[MAIN] speed_pct=%.3f%%\n", speedPercent);
+    }
 }
