@@ -1,49 +1,18 @@
 #include "CANManager.h"
 
-// ---------------------------------------------------------------------------
-// CANManager.cpp
-// ---------------------------------------------------------------------------
+CANManager::CANManager(uint8_t csPin, CAN_SPEED speed, CAN_CLOCK clock)
+    : _mcp(csPin), _speed(speed), _clock(clock)
+{}
 
-CANManager::CANManager(gpio_num_t txPin, gpio_num_t rxPin,
-                       twai_timing_config_t timingCfg)
-    : _txPin(txPin),
-      _rxPin(rxPin),
-      _timingCfg(timingCfg),
-      _rxHandlerCount(0),
-      _txDescriptorCount(0)
-{
-    memset(_rxHandlers,   0, sizeof(_rxHandlers));
-    memset(_txDescriptors, 0, sizeof(_txDescriptors));
-}
-
-// ---------------------------------------------------------------------------
 bool CANManager::begin()
 {
-    // Accept all frames; software filtering is done in _dispatchMessage().
-    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-
-    twai_general_config_t g_config =
-        TWAI_GENERAL_CONFIG_DEFAULT(_txPin, _rxPin, TWAI_MODE_NORMAL);
-
-    // Increase RX queue depth for bursty traffic
-    g_config.rx_queue_len = 32;
-    g_config.tx_queue_len = 16;
-
-    esp_err_t err;
-
-    err = twai_driver_install(&g_config, &_timingCfg, &f_config);
-    if (err != ESP_OK) {
-        Serial.printf("[CAN] driver_install failed: %s\n", esp_err_to_name(err));
+    _mcp.reset();
+    if (_mcp.setBitrate(_speed, _clock) != MCP2515::ERROR_OK) {
+        Serial.println("[CAN] setBitrate failed");
         return false;
     }
-
-    err = twai_start();
-    if (err != ESP_OK) {
-        Serial.printf("[CAN] twai_start failed: %s\n", esp_err_to_name(err));
-        return false;
-    }
-
-    Serial.println("[CAN] TWAI driver started.");
+    _mcp.setNormalMode();
+    Serial.println("[CAN] MCP2515 ready");
     return true;
 }
 
@@ -100,21 +69,18 @@ bool CANManager::sendTxDescriptor(uint8_t index)
 
 void CANManager::_processRx()
 {
-    twai_message_t msg;
-    // Drain all available messages without blocking
-    while (twai_receive(&msg, 0) == ESP_OK) {
-        bool ext = (msg.extd == 1);
-        _dispatchMessage(msg.identifier, ext, msg.data, msg.data_length_code);
+    can_frame f;
+    while (_mcp.readMessage(&f) == MCP2515::ERROR_OK) {
+        _dispatch(f);
     }
 }
 
-// ---------------------------------------------------------------------------
 void CANManager::_processPeriodicTx()
 {
     uint32_t now = millis();
     for (uint8_t i = 0; i < _txDescriptorCount; i++) {
         CANTxDescriptor* d = _txDescriptors[i];
-        if (d->intervalMs == 0) continue;  // on-demand only
+        if (d->intervalMs == 0) continue;
 
         if ((now - d->_lastSentMs) >= d->intervalMs) {
             if (_transmit(d->id, d->extendedId, d->data, d->len)) {
@@ -124,46 +90,29 @@ void CANManager::_processPeriodicTx()
     }
 }
 
-// ---------------------------------------------------------------------------
-void CANManager::_dispatchMessage(uint32_t id, bool extendedId,
-                                  const uint8_t* data, uint8_t len)
+void CANManager::_dispatch(const can_frame& f)
 {
+    // Strip EFF/RTR flags to get the plain numeric ID
+    uint32_t id  = f.can_id & (f.can_id & CAN_EFF_FLAG ? CAN_EFF_MASK : CAN_SFF_MASK);
+    uint8_t  len = f.can_dlc;
+
     for (uint8_t i = 0; i < _rxHandlerCount; i++) {
         const CANRxHandler& h = _rxHandlers[i];
-
-        // Match identifier
         if (h.id != id) continue;
-
-        // Optionally match frame type
-        if (h.extendedId != extendedId) continue;
-
-        // Optionally match command byte (data[0])
-        if (h.filterCommandByte) {
-            if (len == 0 || data[0] != h.commandByte) continue;
-        }
-
-        if (h.callback) {
-            h.callback(id, data, len);
-        }
+        if (h.filterCommandByte && (len == 0 || f.data[0] != h.commandByte)) continue;
+        if (h.callback) h.callback(id, f.data, len);
     }
 }
 
-// ---------------------------------------------------------------------------
-bool CANManager::_transmit(uint32_t id, bool extendedId,
-                            const uint8_t* data, uint8_t len)
+bool CANManager::_transmit(uint32_t id, bool ext, const uint8_t* data, uint8_t len)
 {
-    twai_message_t msg;
-    memset(&msg, 0, sizeof(msg));
+    can_frame f;
+    f.can_id  = ext ? (id | CAN_EFF_FLAG) : id;
+    f.can_dlc = len;
+    memcpy(f.data, data, len);
 
-    msg.identifier       = id;
-    msg.extd             = extendedId ? 1 : 0;
-    msg.data_length_code = len;
-    memcpy(msg.data, data, len);
-
-    esp_err_t err = twai_transmit(&msg, pdMS_TO_TICKS(10));
-    if (err != ESP_OK) {
-        Serial.printf("[CAN] TX failed id=0x%08X err=%s\n",
-                      id, esp_err_to_name(err));
+    if (_mcp.sendMessage(&f) != MCP2515::ERROR_OK) {
+        Serial.printf("[CAN] TX failed id=0x%08X\n", id);
         return false;
     }
     return true;

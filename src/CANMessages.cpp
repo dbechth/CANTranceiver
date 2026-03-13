@@ -24,7 +24,6 @@ static void onRx_18EFF903_AD(uint32_t id, const uint8_t* data, uint8_t len)
 
 CANRxHandler rxHandler_18EFF903_AD = {
     .id                = 0x18EFF903,
-    .extendedId        = true,
     .filterCommandByte = true,
     .commandByte       = 0xAD,
     .callback          = onRx_18EFF903_AD
